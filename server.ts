@@ -1,3 +1,12 @@
+import { parseHTML } from "npm:linkedom";
+import { Readability } from "npm:@mozilla/readability";
+
+type SearchResult = {
+  title: string;
+  url: string;
+  snippet: string;
+};
+
 export default {
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
@@ -9,10 +18,10 @@ export default {
     };
 
     if (!query) {
-      return new Response(JSON.stringify({ error: "Missing query" }), {
-        status: 400,
-        headers,
-      });
+      return new Response(
+        JSON.stringify({ error: "Missing ?query=" }),
+        { status: 400, headers }
+      );
     }
 
     // 1. SEARCH
@@ -27,47 +36,71 @@ export default {
 
     const html = await searchRes.text();
 
-    // 2. EXTRACT RESULTS
-    const rawResults: { title: string; url: string }[] = [];
+    // 2. EXTRACT + DECODE URLS
+    const raw: { title: string; url: string }[] = [];
 
     const regex =
       /<a rel="nofollow" class="result__a" href="(.*?)".*?>(.*?)<\/a>/g;
 
     let match;
 
-    while ((match = regex.exec(html)) && rawResults.length < 5) {
-      rawResults.push({
+    while ((match = regex.exec(html)) && raw.length < 5) {
+      raw.push({
         title: clean(match[2]),
         url: decodeDuckUrl(match[1]),
       });
     }
 
-    // 3. FETCH SNIPPETS FROM EACH PAGE (IMPORTANT PART)
-    const results = [];
+    // 3. FETCH + READABILITY PARSING (THE IMPORTANT PART)
+    const results = await Promise.allSettled(
+      raw.map(async (r) => {
+        const pageRes = await fetch(r.url, {
+          headers: {
+            "user-agent": "Mozilla/5.0",
+          },
+        });
 
-    for (const r of rawResults) {
-      try {
-        const snippet = await fetchSnippet(r.url);
+        const pageHtml = await pageRes.text();
 
-        results.push({
+        // Convert HTML → DOM
+        const { document } = parseHTML(pageHtml);
+
+        // Run Mozilla Readability (THIS is the “Reader Mode” engine)
+        const reader = new Readability(document);
+        const article = reader.parse();
+
+        let snippet = "";
+
+        if (article?.textContent) {
+          snippet = smartTrim(article.textContent);
+        } else {
+          snippet = "No readable content extracted";
+        }
+
+        return {
           title: r.title,
           url: r.url,
           snippet,
-        });
-      } catch {
-        results.push({
-          title: r.title,
-          url: r.url,
-          snippet: "Failed to fetch snippet",
-        });
-      }
-    }
+        };
+      })
+    );
 
-    return new Response(JSON.stringify({ query, results }), { headers });
+    // 4. CLEAN OUTPUT
+    const finalResults = results
+      .filter((r): r is PromiseFulfilledResult<SearchResult> => r.status === "fulfilled")
+      .map((r) => r.value);
+
+    return new Response(
+      JSON.stringify({
+        query,
+        results: finalResults,
+      }),
+      { headers }
+    );
   },
 };
 
-// -------------------- HELPERS --------------------
+// ---------------- HELPERS ----------------
 
 function decodeDuckUrl(url: string) {
   const match = url.match(/uddg=([^&]+)/);
@@ -79,27 +112,13 @@ function clean(html: string) {
   return html.replace(/<.*?>/g, "").trim();
 }
 
-// Extract readable text from HTML (simple but effective)
-function extractText(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
+// “AI-like snippet compression”
+function smartTrim(text: string): string {
+  return text
     .replace(/\s+/g, " ")
-    .trim();
-}
-
-// Fetch page + build snippet
-async function fetchSnippet(url: string): Promise<string> {
-  const res = await fetch(url, {
-    headers: {
-      "user-agent": "Mozilla/5.0",
-    },
-  });
-
-  const html = await res.text();
-  const text = extractText(html);
-
-  // return first 300 chars as snippet
-  return text.slice(0, 300);
+    .trim()
+    .split(". ")
+    .slice(0, 3) // take first few meaningful sentences
+    .join(". ")
+    .slice(0, 500);
 }
