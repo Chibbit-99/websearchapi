@@ -257,13 +257,29 @@ function makeSnippet(text: string, query: string): string {
 }
 
 function buildAnswer(results: Result[], query: string): string {
-  const top = results.filter((r) => r.snippet).slice(0, 3);
-  if (!top.length) return `I could not find readable English results for "${query}".`;
+  const text = results
+    .map((r) => r.snippet)
+    .filter(Boolean)
+    .join(" ");
 
-  const text = top.map((r) => r.snippet).join(" ");
-  return summarize(text).slice(0, 700);
+  if (!text) return `No reliable information found for "${query}".`;
+
+  const sentences = text
+    .split(/(?<=[.!?])\s+/)
+    .map(s => s.trim())
+    .filter(s => s.length > 40);
+
+  const ranked = sentences
+    .map(s => ({
+      text: s,
+      score: sentenceScore(s, query),
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map(s => s.text);
+
+  return ranked.join(" ").slice(0, 800);
 }
-
 function buildContext(results: Result[]): string {
   return results
     .map((r, i) =>
