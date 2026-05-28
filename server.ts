@@ -1,12 +1,6 @@
 import { parseHTML } from "npm:linkedom";
 import { Readability } from "npm:@mozilla/readability";
 
-type SearchResult = {
-  title: string;
-  url: string;
-  snippet: string;
-};
-
 export default {
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
@@ -18,10 +12,10 @@ export default {
     };
 
     if (!query) {
-      return new Response(
-        JSON.stringify({ error: "Missing ?query=" }),
-        { status: 400, headers }
-      );
+      return new Response(JSON.stringify({ error: "Missing query" }), {
+        status: 400,
+        headers,
+      });
     }
 
     // 1. SEARCH
@@ -36,7 +30,7 @@ export default {
 
     const html = await searchRes.text();
 
-    // 2. EXTRACT + DECODE URLS
+    // 2. EXTRACT RESULTS
     const raw: { title: string; url: string }[] = [];
 
     const regex =
@@ -51,31 +45,29 @@ export default {
       });
     }
 
-    // 3. FETCH + READABILITY PARSING (THE IMPORTANT PART)
+    // 3. FETCH + PROCESS PAGES
     const results = await Promise.allSettled(
       raw.map(async (r) => {
-        const pageRes = await fetch(r.url, {
+        const page = await fetch(r.url, {
           headers: {
             "user-agent": "Mozilla/5.0",
           },
         });
 
-        const pageHtml = await pageRes.text();
+        const pageHtml = await page.text();
 
-        // Convert HTML → DOM
         const { document } = parseHTML(pageHtml);
-
-        // Run Mozilla Readability (THIS is the “Reader Mode” engine)
         const reader = new Readability(document);
         const article = reader.parse();
 
-        let snippet = "";
+        let text = article?.textContent ?? "";
 
-        if (article?.textContent) {
-          snippet = smartTrim(article.textContent);
-        } else {
-          snippet = "No readable content extracted";
+        // 🧠 FILTER OUT NON-ENGLISH (simple heuristic)
+        if (!looksEnglish(text)) {
+          throw new Error("Non-English content skipped");
         }
+
+        const snippet = compressText(text);
 
         return {
           title: r.title,
@@ -85,16 +77,12 @@ export default {
       })
     );
 
-    // 4. CLEAN OUTPUT
     const finalResults = results
-      .filter((r): r is PromiseFulfilledResult<SearchResult> => r.status === "fulfilled")
+      .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled")
       .map((r) => r.value);
 
     return new Response(
-      JSON.stringify({
-        query,
-        results: finalResults,
-      }),
+      JSON.stringify({ query, results: finalResults }),
       { headers }
     );
   },
@@ -104,21 +92,75 @@ export default {
 
 function decodeDuckUrl(url: string) {
   const match = url.match(/uddg=([^&]+)/);
-  if (!match) return url;
-  return decodeURIComponent(match[1]);
+  return match ? decodeURIComponent(match[1]) : url;
 }
 
-function clean(html: string) {
-  return html.replace(/<.*?>/g, "").trim();
+function clean(text: string) {
+  return text.replace(/<.*?>/g, "").trim();
 }
 
-// “AI-like snippet compression”
-function smartTrim(text: string): string {
+function looksEnglish(text: string): boolean {
+  if (!text) return false;
+
+  const sample = text.slice(0, 500);
+
+  // heuristic: count common English words
+  const englishWords = [
+    "the",
+    "is",
+    "and",
+    "to",
+    "of",
+    "in",
+    "for",
+    "with",
+    "on",
+    "this",
+    "it",
+    "by",
+  ];
+
+  const lower = sample.toLowerCase();
+  const score = englishWords.reduce((acc, w) => acc + (lower.includes(w) ? 1 : 0), 0);
+
+  return score >= 3;
+}
+
+function compressText(text: string): string {
   return text
     .replace(/\s+/g, " ")
     .trim()
     .split(". ")
-    .slice(0, 3) // take first few meaningful sentences
+    .map(scoreSentence)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3)
+    .map((s) => s.text)
     .join(". ")
-    .slice(0, 500);
+    .slice(0, 450);
+}
+
+function scoreSentence(sentence: string) {
+  const keywords = [
+    "is",
+    "are",
+    "was",
+    "definition",
+    "means",
+    "released",
+    "developed",
+    "used",
+    "known",
+  ];
+
+  let score = 0;
+
+  const lower = sentence.toLowerCase();
+
+  if (sentence.length > 40 && sentence.length < 200) score += 2;
+
+  for (const k of keywords) {
+    if (lower.includes(k)) score += 2;
+  }
+
+  return { text: sentence, score };
 }
