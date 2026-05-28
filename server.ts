@@ -1,64 +1,37 @@
-import { DDGS } from "npm:duckduckgo-search";
+export default {
+  async fetch(req: Request) {
+    const url = new URL(req.url);
+    const query = url.searchParams.get("query");
 
-type SearchResult = {
-  title: string;
-  snippet: string;
-  url: string;
-};
+    const headers = {
+      "content-type": "application/json",
+      "access-control-allow-origin": "*",
+    };
 
-async function webSearch(query: string, maxResults = 5): Promise<SearchResult[]> {
-  const results: SearchResult[] = [];
+    if (!query) {
+      return new Response(JSON.stringify({ error: "missing query" }), {
+        status: 400,
+        headers,
+      });
+    }
 
-  const ddgs = new DDGS();
-  const searchResults = await ddgs.text(query, { max_results: maxResults });
-
-  for (const r of searchResults) {
-    results.push({
-      title: r.title ?? "",
-      snippet: r.body ?? "",
-      url: r.href ?? "",
-    });
-  }
-
-  return results;
-}
-
-Deno.serve(async (req) => {
-  const url = new URL(req.url);
-  const query = url.searchParams.get("query");
-
-  // basic CORS (so you can call it from browsers)
-  const headers = {
-    "content-type": "application/json",
-    "access-control-allow-origin": "*",
-  };
-
-  if (!query) {
-    return new Response(
-      JSON.stringify({
-        error: "Missing query parameter. Use /?query=your+search",
-      }),
-      { status: 400, headers }
+    const res = await fetch(
+      `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`
     );
-  }
 
-  try {
-    const results = await webSearch(query);
+    const html = await res.text();
+
+    // VERY simple extraction (title + links)
+    const results = [...html.matchAll(/<a rel="nofollow" class="result__a" href="(.*?)".*?>(.*?)<\/a>/g)]
+      .slice(0, 5)
+      .map((m) => ({
+        url: m[1],
+        title: m[2].replace(/<.*?>/g, ""),
+      }));
 
     return new Response(
-      JSON.stringify({
-        query,
-        results,
-      }),
+      JSON.stringify({ query, results }),
       { headers }
     );
-  } catch (err) {
-    return new Response(
-      JSON.stringify({
-        error: "Search failed",
-        details: String(err),
-      }),
-      { status: 500, headers }
-    );
-  }
-});
+  },
+};
