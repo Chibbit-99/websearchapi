@@ -257,41 +257,85 @@ function makeSnippet(text: string, query: string): string {
 }
 
 function buildAnswer(results: Result[], query: string): string {
-  const text = results
+  const blacklist = [
+    "external links",
+    "navigation",
+    "main menu",
+    "official website",
+    "v t e",
+    "privacy policy",
+    "terms of use",
+    "skip to content",
+    "sign in",
+    "subscribe",
+    "cookie",
+    "all rights reserved",
+  ];
+
+  // Combine snippets
+  const allText = results
     .map((r) => r.snippet)
     .filter(Boolean)
     .join(" ");
 
-  if (!text) return `No reliable information found for "${query}".`;
+  if (!allText.trim()) {
+    return `No reliable information found for "${query}".`;
+  }
 
-  const sentences = text
+  // Split into sentences
+  let sentences = allText
     .split(/(?<=[.!?])\s+/)
-    .map(s => s.trim())
-    .filter(s => s.length > 40);
+    .map((s) => clean(s))
+    .filter(Boolean);
 
+  // Remove garbage / nav text
+  sentences = sentences.filter((s) => {
+    const lower = s.toLowerCase();
+
+    if (s.length < 40) return false;
+
+    for (const bad of blacklist) {
+      if (lower.includes(bad)) return false;
+    }
+
+    // remove super noisy sentences
+    const capsRatio =
+      (s.match(/[A-Z]/g)?.length ?? 0) / Math.max(1, s.length);
+
+    if (capsRatio > 0.35) return false;
+
+    return true;
+  });
+
+  // Rank sentences
   const ranked = sentences
-    .map(s => ({
+    .map((s) => ({
       text: s,
       score: sentenceScore(s, query),
     }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 5)
-    .map(s => s.text);
+    .sort((a, b) => b.score - a.score);
 
-  return ranked.join(" ").slice(0, 800);
-}
-function buildContext(results: Result[]): string {
-  return results
-    .map((r, i) =>
-      [
-        `[${i + 1}] ${r.title}`,
-        `URL: ${r.url}`,
-        `Host: ${hostFromUrl(r.url)}`,
-        `Snippet: ${r.snippet || "(no snippet)"}`,
-      ].join("\n"),
-    )
-    .join("\n\n")
-    .slice(0, 12000);
+  // Deduplicate overlapping sentences
+  const chosen: string[] = [];
+
+  for (const item of ranked) {
+    if (chosen.length >= 5) break;
+
+    const tooSimilar = chosen.some(
+      (existing) => overlap(existing, item.text) > 0.75,
+    );
+
+    if (!tooSimilar) {
+      chosen.push(item.text);
+    }
+  }
+
+  // Final compression
+  return chosen
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 1000);
 }
 
 function summarize(text: string): string {
